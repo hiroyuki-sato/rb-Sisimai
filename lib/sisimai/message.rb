@@ -11,6 +11,7 @@ module Sisimai
     require 'sisimai/string'
     require 'sisimai/rfc3834'
     require 'sisimai/rfc5322'
+    require 'thread'
 
     @@rwaccessors = [
       :from,    # [String] UNIX From line
@@ -20,6 +21,7 @@ module Sisimai
     ]
     @@rwaccessors.each { |e| attr_accessor e }
 
+    GLOBAL_MUTEX = Mutex.new
     EndOfEmail = Sisimai::String.EOM
     RFC822Head = Sisimai::RFC5322.HEADERFIELDS
     RFC3834Set = Sisimai::RFC3834.headerlist.map { |e| e.downcase }
@@ -134,8 +136,10 @@ module Sisimai
       processing['header'] = Sisimai::Message.headers(aftersplit['header'])
 
       # 3. Check headers for detecting MTA/MSP module
-      if @@TryOnFirst.empty?
-        @@TryOnFirst.concat(Sisimai::Message.makeorder(processing['header']))
+      GLOBAL_MUTEX.synchronize do
+        if @@TryOnFirst.empty?
+          @@TryOnFirst.concat(Sisimai::Message.makeorder(processing['header']))
+        end
       end
 
       # 4. Rewrite message body for detecting the bounce reason
@@ -243,7 +247,9 @@ module Sisimai
             # Other headers except "Received" and so on
             if @@ExtHeaders[currheader]
               # MTA specific header
-              @@TryOnFirst.concat(@@ExtHeaders[currheader].keys)
+              GLOBAL_MUTEX.synchronize do
+                @@TryOnFirst.concat(@@ExtHeaders[currheader].keys)
+              end
             end
             structured[currheader] = rhs
           end
@@ -457,19 +463,21 @@ module Sisimai
             throw :SCANNER if scannedset
           end
 
-          @@TryOnFirst.each do |r|
-            # Try MTA module candidates which are detected from MTA specific
-            # mail headers on first
-            next if haveloaded.key?(r)
-            begin
-              require r.gsub('::', '/').downcase
-            rescue LoadError => ce
-              warn ' ***warning: ' + ce.to_s
-              next
+          GLOBAL_MUTEX.synchronize do
+            @@TryOnFirst.each do |r|
+              # Try MTA module candidates which are detected from MTA specific
+              # mail headers on first
+              next if haveloaded.key?(r)
+              begin
+                require r.gsub('::', '/').downcase
+              rescue LoadError => ce
+                warn ' ***warning: ' + ce.to_s
+                next
+              end
+              scannedset = Module.const_get(r).scan(mailheader, bodystring)
+              haveloaded[r] = true
+              throw :SCANNER if scannedset
             end
-            scannedset = Module.const_get(r).scan(mailheader, bodystring)
-            haveloaded[r] = true
-            throw :SCANNER if scannedset
           end
 
           @@DefaultSet.each do |r|
